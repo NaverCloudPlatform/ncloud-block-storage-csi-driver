@@ -1,0 +1,251 @@
+# Continuous integration for the public repository.
+#
+# Design constraints for a public repository:
+# - Fork PRs run untrusted code: GitHub-hosted runners only, no secrets in
+#   any pull_request-triggered job, no pull_request_target.
+# - Minimal permissions and per-ref concurrency.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l cmd pkg)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt required for:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go mod tidy check
+        run: go mod tidy -diff
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Build (linux/amd64)
+        run: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build ./...
+
+      - name: Unit tests (race, includes the csi-sanity conformance suite)
+        run: go test -race ./...
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: bump-version keeps VERSION, chart and changelog in sync
+        run: |
+          workdir="$(mktemp -d)"
+          cp -R . "$workdir/repo"
+          make -C "$workdir/repo" bump-version NEW_VERSION=v9.9.9-ci
+          test "$(cat "$workdir/repo/VERSION")" = "v9.9.9-ci"
+          grep -q '^version: 9.9.9-ci$' "$workdir/repo/deploy/chart/ncloud-block-storage-csi-driver/Chart.yaml"
+          grep -q '^appVersion: "9.9.9-ci"$' "$workdir/repo/deploy/chart/ncloud-block-storage-csi-driver/Chart.yaml"
+          grep -q '^## v9.9.9-ci - ' "$workdir/repo/CHANGELOG.md"
+          grep -q '^## unreleased$' "$workdir/repo/CHANGELOG.md"
+          if make -C "$workdir/repo" bump-version NEW_VERSION=not-semver 2>/dev/null; then
+            echo "bump-version must reject a non-semver NEW_VERSION"
+            exit 1
+          fi
+          test "$(cat "$workdir/repo/VERSION")" = "v9.9.9-ci"  # rejected run must not modify files
+          rm -rf "$workdir"
+
+  helm:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@v4
+
+      - name: helm lint
+        run: helm lint --strict deploy/chart/ncloud-block-storage-csi-driver
+
+      - name: helm template
+        run: |
+          helm template test deploy/chart/ncloud-block-storage-csi-driver \
+            --set image.csi_plugin=registry.example.com/ncloud-block-storage-csi-driver:test \
+            > /tmp/rendered.yaml
+
+      - name: node health endpoints bind to the loopback interface only
+        run: |
+          if grep -E -- '--http-endpoint=(:|0\.0\.0\.0:|\[::\]:)[0-9]+' /tmp/rendered.yaml; then
+            echo "a health endpoint on the hostNetwork DaemonSet binds to all interfaces"
+            exit 1
+          fi
+          test "$(grep -c -- '--http-endpoint=localhost:' /tmp/rendered.yaml)" -eq 2
+          # Every httpGet probe on the hostNetwork DaemonSet -- liveness and
+          # startup, driver and registrar -- must pin the loopback host.
+          helm template test deploy/chart/ncloud-block-storage-csi-driver \
+            --set image.csi_plugin=registry.example.com/ncloud-block-storage-csi-driver:test \
+            --show-only templates/daemonset.yaml > /tmp/rendered-daemonset.yaml
+          test "$(grep -c -- 'httpGet:' /tmp/rendered-daemonset.yaml)" -eq 4
+          test "$(grep -c -- 'host: localhost' /tmp/rendered-daemonset.yaml)" -eq 4
+
+      - name: RBAC must not grant Secret API access
+        run: |
+          # Match both inline arrays (resources: ["secrets"]) and block
+          # sequences (a bare "- secrets" item) — a gate that only sees one
+          # YAML style is worse than no gate.
+          if grep -E 'resources:.*\bsecrets\b' /tmp/rendered.yaml \
+            || grep -E '^\s*-\s*"?secrets"?\s*$' /tmp/rendered.yaml; then
+            echo "rendered RBAC grants Secret API access; the driver's env-based auth does not need it"
+            exit 1
+          fi
+
+      - name: csi-provisioner must keep --strict-topology
+        run: |
+          if ! grep -q -- '--strict-topology=true' /tmp/rendered.yaml; then
+            echo "rendered csi-provisioner args lost --strict-topology=true (topology porting regression)"
+            exit 1
+          fi
+
+      - name: CSIDriver must state its fsGroupPolicy
+        run: |
+          grep -q 'fsGroupPolicy: ReadWriteOnceWithFSType' /tmp/rendered.yaml
+
+      - name: coexistence toggles suppress optional components
+        run: |
+          helm template test deploy/chart/ncloud-block-storage-csi-driver \
+            --set image.csi_plugin=registry.example.com/ncloud-block-storage-csi-driver:test \
+            --set snapshotController.enabled=false \
+            --set volumeSnapshotClass.create=false \
+            --set storageClass.create=false > /tmp/rendered-min.yaml
+          for marker in "kind: VolumeSnapshotClass" "name: snapshot-controller" "kind: StorageClass"; do
+            if grep -q "$marker" /tmp/rendered-min.yaml; then
+              echo "'$marker' rendered although its toggle is disabled"
+              exit 1
+            fi
+          done
+
+      - name: helm template (special-character credentials)
+        run: |
+          helm template test deploy/chart/ncloud-block-storage-csi-driver \
+            --set image.csi_plugin=registry.example.com/ncloud-block-storage-csi-driver:test \
+            --set credentials.create=true \
+            --set credentials.accessKey='abc: def' \
+            --set credentials.secretKey='0123 #x' \
+            > /dev/null
+
+      - name: name-typed values stay strings in the render
+        run: |
+          helm template test deploy/chart/ncloud-block-storage-csi-driver \
+            --set image.csi_plugin=registry.example.com/ncloud-block-storage-csi-driver:test \
+            --set-string storageClass.name=0123 \
+            --set-string volumeSnapshotClass.name=true \
+            --set-string credentials.secretName='a: b' > /tmp/rendered-names.yaml
+          grep -q 'name: "0123"' /tmp/rendered-names.yaml
+          grep -q 'name: "true"' /tmp/rendered-names.yaml
+          grep -q 'name: "a: b"' /tmp/rendered-names.yaml
+
+      - name: values schema rejects invalid and unknown values
+        run: |
+          for bad in "regionCode=" "unknownTopLevelKey=1" "storageClass.fsType=btrfs" "node.healthPort=99999" "credentials.node.create=true" "storageClass.type=SSD" "controller.logLevel=11"; do
+            if helm template test deploy/chart/ncloud-block-storage-csi-driver \
+              --set image.csi_plugin=registry.example.com/ncloud-block-storage-csi-driver:test \
+              --set "$bad" > /dev/null 2>&1; then
+              echo "values.schema.json accepted invalid input: $bad"
+              exit 1
+            fi
+          done
+
+      - name: node credential separation targets the right Secret
+        run: |
+          helm template test deploy/chart/ncloud-block-storage-csi-driver \
+            --set image.csi_plugin=registry.example.com/ncloud-block-storage-csi-driver:test \
+            --set credentials.node.secretName=node-creds \
+            --show-only templates/daemonset.yaml > /tmp/rendered-node-ds.yaml
+          grep -q 'name: "node-creds"' /tmp/rendered-node-ds.yaml
+          if grep -q 'name: "ncloud-csi-creds"' /tmp/rendered-node-ds.yaml; then
+            echo "daemonset still references the shared credential Secret despite credentials.node.secretName"
+            exit 1
+          fi
+          helm template test deploy/chart/ncloud-block-storage-csi-driver \
+            --set image.csi_plugin=registry.example.com/ncloud-block-storage-csi-driver:test \
+            --set credentials.node.secretName=node-creds \
+            --show-only templates/controller-deployment.yaml | grep -q 'name: "ncloud-csi-creds"'
+
+  docker:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        run: docker buildx build --platform linux/amd64 -t ci-build:${{ github.sha }} --load .
+
+      # The driver's data plane is the image's userland (mkfs/mount tools):
+      # a base-image bump can silently change on-disk filesystem features
+      # beyond what conservative node kernels support. Assert the pinned
+      # preset exists and produces a filesystem without the kernel-6.10+
+      # feature bits; print ext4 features for the same class of risk.
+      - name: Filesystem toolchain smoke test (runtime image)
+        run: |
+          docker run --rm --entrypoint sh ci-build:${{ github.sha }} -c '
+            set -e
+            test -f /usr/share/xfsprogs/mkfs/lts_5.15.conf
+            truncate -s 300M /tmp/xfs.img
+            mkfs.xfs -c options=/usr/share/xfsprogs/mkfs/lts_5.15.conf -f /tmp/xfs.img >/dev/null
+            if xfs_db -c version /tmp/xfs.img | grep -qiE "PARENT|NREXT64|EXCHRANGE|METADIR"; then
+              echo "mkfs.xfs enabled superblock features that older node kernels reject"
+              exit 1
+            fi
+            truncate -s 300M /tmp/ext4.img
+            mkfs.ext4 -F -q /tmp/ext4.img
+            echo "ext4 default features (informational):"
+            tune2fs -l /tmp/ext4.img | grep -i features
+          '
+
+      # The mount side of the data plane: mount/umount must be util-linux,
+      # not busybox — busybox mount skips the automatic read-only remount
+      # for bind mounts, so a readOnly publish silently stays writable and
+      # retries wedge on the read-only verification.
+      - name: Mount toolchain smoke test (runtime image)
+        run: |
+          docker run --rm --privileged --entrypoint sh ci-build:${{ github.sha }} -c '
+            set -e
+            for tool in mount umount; do
+              if [ "$(readlink -f "$(command -v $tool)")" = "/bin/busybox" ]; then
+                echo "$tool is busybox; util-linux $tool is required for ro bind remounts"
+                exit 1
+              fi
+            done
+            mkdir -p /staging /target
+            mount -o bind,ro /staging /target
+            if ! findmnt -o OPTIONS --noheadings --target /target | grep -qE "(^|,)ro(,|$)"; then
+              echo "bind,ro mount did not apply read-only"
+              exit 1
+            fi
+            if touch /target/w 2>/dev/null; then
+              echo "write succeeded on a read-only bind mount"
+              exit 1
+            fi
+            umount /target
+          '

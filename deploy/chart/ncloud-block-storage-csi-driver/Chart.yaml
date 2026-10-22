@@ -1,0 +1,24 @@
+apiVersion: v2
+name: ncloud-block-storage-csi-driver
+description: A Helm chart for Naver Cloud Platform Block Storage CSI Driver
+type: application
+version: 1.0.0
+# Lower bound from the bundled external-snapshotter v8.x components; the
+# sidecars themselves run on much older clusters (csi-provisioner v6.x and
+# csi-resizer v2.x detect a missing VolumeAttributesClass v1 API and disable
+# that feature by themselves). Validation coverage for this chart is on
+# Kubernetes 1.34+.
+kubeVersion: ">= 1.25.0-0"
+appVersion: "1.0.0"
+home: https://github.com/NaverCloudPlatform/ncloud-block-storage-csi-driver
+sources:
+  - https://github.com/NaverCloudPlatform/ncloud-block-storage-csi-driver
+keywords:
+  - ncloud
+  - naver cloud
+  - csi
+  - block storage
+  - kubernetes
+maintainers:
+  - name: NaverCloudPlatform
+    url: https://github.com/NaverCloudPlatform

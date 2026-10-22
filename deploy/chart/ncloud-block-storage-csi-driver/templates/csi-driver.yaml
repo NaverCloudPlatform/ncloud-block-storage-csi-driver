@@ -1,0 +1,23 @@
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: blk.csi.ncloud.com
+spec:
+  attachRequired: true
+  podInfoOnMount: true
+  # Stated explicitly because the filesystem-selection contract relies on
+  # it: kubelet only applies fsGroup ownership when the PV records a
+  # fsType. This is also the Kubernetes default.
+  fsGroupPolicy: ReadWriteOnceWithFSType
+{{- if .Values.volumeSnapshotClass.create }}
+
+---
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: {{ .Values.volumeSnapshotClass.name | quote }}
+  annotations:
+    snapshot.storage.kubernetes.io/is-default-class: {{ .Values.volumeSnapshotClass.isDefault | quote }}
+driver: blk.csi.ncloud.com
+deletionPolicy: {{ .Values.volumeSnapshotClass.deletionPolicy }}
+{{- end }}

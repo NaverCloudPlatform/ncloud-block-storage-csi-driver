@@ -1,0 +1,205 @@
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: ncloud-block-storage-csi-controller-sa
+  namespace: {{ .Release.Namespace }}
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: ncloud-block-storage-csi-provisioner-role
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    # Follows the external-provisioner v6.1.0 RBAC for the features this
+    # chart enables; "patch" is required for PV finalizer/metadata updates.
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "list"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents"]
+    verbs: ["get", "list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch"]
+
+---
+
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: ncloud-block-storage-csi-provisioner-binding
+subjects:
+  - kind: ServiceAccount
+    name: ncloud-block-storage-csi-controller-sa
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: ncloud-block-storage-csi-provisioner-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: ncloud-block-storage-csi-attacher-role
+# Matches the official external-attacher v4.10.0 RBAC: no "nodes" access
+# (the attacher watches CSINode, not Node) and patch-only object updates.
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments/status"]
+    verbs: ["patch"]
+
+---
+
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: ncloud-block-storage-csi-attacher-binding
+subjects:
+  - kind: ServiceAccount
+    name: ncloud-block-storage-csi-controller-sa
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: ncloud-block-storage-csi-attacher-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: ncloud-block-storage-csi-snapshotter-role
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents"]
+    # Matches the official csi-snapshotter v8.4.0 RBAC: creating and
+    # deleting VolumeSnapshotContent objects is the snapshot-controller's
+    # job, not the sidecar's.
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents/status"]
+    verbs: ["update", "patch"]
+
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: ncloud-block-storage-csi-snapshotter-binding
+subjects:
+  - kind: ServiceAccount
+    name: ncloud-block-storage-csi-controller-sa
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: ncloud-block-storage-csi-snapshotter-role
+  apiGroup: rbac.authorization.k8s.io
+
+
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: ncloud-block-storage-csi-resizer-role
+# Matches the official external-resizer v2.0.0 RBAC (patch-only updates,
+# no storageclasses access).
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims/status"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattributesclasses"]
+    verbs: ["get", "list", "watch"]
+---
+
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: ncloud-block-storage-csi-resizer-binding
+subjects:
+  - kind: ServiceAccount
+    name: ncloud-block-storage-csi-controller-sa
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: ncloud-block-storage-csi-resizer-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Leader-election leases for every controller sidecar (they share this
+# ServiceAccount). Upstream ships these as namespaced Roles: a cluster-wide
+# lease grant would let a compromised controller pod tamper with leader
+# elections in other namespaces, including kube-system.
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: ncloud-block-storage-csi-controller-leaderelection
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "watch", "list", "delete", "update", "create"]
+
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: ncloud-block-storage-csi-controller-leaderelection
+  namespace: {{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: ncloud-block-storage-csi-controller-sa
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: ncloud-block-storage-csi-controller-leaderelection
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ncloud-block-storage-csi-node-sa
+  namespace: {{ .Release.Namespace }}
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+# No RBAC: csi-node-driver-registrar does not talk to the Kubernetes API
+# (upstream README, "Required permissions"), and the driver's node mode
+# uses only IMDS and the Ncloud API — never the Kubernetes API. For the
+# same reason the token is not mounted into the (privileged, hostNetwork)
+# node pods at all.
+automountServiceAccountToken: false

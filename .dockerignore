@@ -1,0 +1,16 @@
+.git
+.github
+.idea
+bin/
+deploy/
+examples/
+hack/
+publish/
+.gitignore
+.dockerignore
+CLAUDE.md
+*.md
+LICENSE
+Makefile
+.DS_Store
+**/.DS_Store

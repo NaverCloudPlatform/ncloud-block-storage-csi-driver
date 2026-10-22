@@ -1,0 +1,179 @@
+# ──────────────────────────────────────────────
+# Ncloud Block Storage CSI Driver - Helm Values
+# ──────────────────────────────────────────────
+
+# -- Container images for each sidecar and the CSI plugin.
+image:
+  csi_provisioner: registry.k8s.io/sig-storage/csi-provisioner:v6.1.0
+  csi_attacher: registry.k8s.io/sig-storage/csi-attacher:v4.10.0
+  csi_snapshotter: registry.k8s.io/sig-storage/csi-snapshotter:v8.4.0
+  csi_resizer: registry.k8s.io/sig-storage/csi-resizer:v2.0.0
+  # -- REQUIRED. The CSI driver image, e.g. <your-registry>/ncloud-block-storage-csi-driver:v1.0.0.
+  # Build and push it with `make image push REGISTRY=<your-registry>`.
+  csi_plugin: ""
+  liveness_probe: registry.k8s.io/sig-storage/livenessprobe:v2.17.0
+  csi_node_driver_registrar: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.15.0
+  snapshot_controller: registry.k8s.io/sig-storage/snapshot-controller:v8.4.0
+
+# -- Image pull secrets attached to all chart ServiceAccounts,
+# for pulling the driver image from a private registry.
+# imagePullSecrets:
+#   - name: my-registry-secret
+imagePullSecrets: []
+
+# -- Ncloud API credentials.
+# credentials.secretName: name of a Secret in the release namespace containing 'accessKey' and 'secretKey'.
+# credentials.create: set to true to have the chart create the Secret from credentials.accessKey / credentials.secretKey.
+credentials:
+  secretName: ncloud-csi-creds
+  create: false
+  # accessKey: ""   # only used when create=true
+  # secretKey: ""   # only used when create=true
+  # -- Optional separate credentials for the node DaemonSet, so nodes can
+  # run with a least-privilege API key: the node plugin only reads the
+  # server instance and server spec at startup (attachment limit lookup)
+  # and never creates, attaches, or deletes resources. Leave secretName
+  # empty to reuse the shared Secret above.
+  node:
+    secretName: ""
+    create: false
+    # accessKey: ""   # only used when node.create=true
+    # secretKey: ""   # only used when node.create=true
+
+# -- Ncloud region for API calls. Topology does not come from here: the
+# node plugin reads its zone from the instance metadata service. The two
+# must agree, though — the node plugin refuses to start when this is not
+# the region of its zone (the prefix of the zone code).
+regionCode: KR
+
+# -- Ncloud API Gateway origin: scheme and host only, no path (the driver
+# appends /vserver/v2). Leave empty for the public gateway
+# (https://ncloud.apigw.ntruss.com), which serves the public platform only;
+# on the financial platform set https://fin-ncloud.apigw.fin-ntruss.com and
+# on the government platform https://ncloud.apigw.gov-ntruss.com.
+apiUrl: ""
+
+# -- Numeric regionNo advertised as a legacy node topology key, for
+# clusters whose PersistentVolumes carry regionNo/zoneNo node affinity
+# from an earlier driver (zoneNo is advertised automatically; the region
+# number is available from neither the instance metadata nor the public
+# API). Read it from such a node:
+#   kubectl get nodes -o jsonpath='{.items[0].metadata.labels.regionNo}'
+# Leave empty ("") otherwise. Deprecated; will be removed in a future
+# major version.
+legacyRegionNo: ""
+
+# -- Maximum number of volumes attachable per node, overriding the limit
+# reported by the Ncloud server spec API (the driver's MAX_VOLUMES_PER_NODE
+# environment variable). When set, the server
+# spec lookup is skipped entirely. Leave 0 to use the API-reported limit —
+# the node plugin fails to start when the API does not report one, so set
+# this explicitly in that case.
+maxVolumesPerNode: 0
+
+# -- Controller deployment configuration.
+controller:
+  # -- Number of controller pod replicas.
+  # CSI sidecars (provisioner, attacher, etc.) have built-in leader election,
+  # so multiple replicas are safe and provide high availability.
+  replicas: 1
+  # -- klog verbosity of the driver container.
+  logLevel: 2
+  # -- Resources for the driver container (sidecar resources are fixed).
+  resources:
+    requests:
+      cpu: 10m
+      memory: 40Mi
+    limits:
+      memory: 500Mi
+  # -- Extra nodeSelector for the controller pods
+  # (kubernetes.io/os: linux is always set).
+  nodeSelector: {}
+  # -- Extra tolerations appended to the built-in ones
+  # (CriticalAddonsOnly, NoExecute for 300s).
+  tolerations: []
+  # -- Affinity for the controller pods.
+  affinity: {}
+
+# -- Node DaemonSet configuration.
+node:
+  # -- klog verbosity of the driver container.
+  logLevel: 2
+  # -- How long NodeStageVolume waits for the attached device's by-id
+  # symlink to appear (Go duration, e.g. "90s"). The hypervisor hot-plug
+  # and udev can take tens of seconds. Empty keeps the driver's 60s
+  # default; "0" fails on the first miss instead of waiting. On the
+  # command line pass it with --set-string: a bare --set ...=0 is a
+  # number, which the schema rejects.
+  deviceDiscoveryTimeout: ""
+  # -- Resources for the driver container (sidecar resources are fixed).
+  resources:
+    requests:
+      cpu: 10m
+      memory: 40Mi
+    limits:
+      memory: 256Mi
+  # -- Extra nodeSelector for the node DaemonSet
+  # (kubernetes.io/os: linux is always set).
+  nodeSelector: {}
+  # -- Tolerations for the node DaemonSet. The default tolerates every
+  # NoSchedule/NoExecute taint so storage keeps working on tainted nodes.
+  tolerations:
+    - effect: NoSchedule
+      operator: Exists
+    - effect: NoExecute
+      operator: Exists
+  # -- Health endpoint ports. The DaemonSet runs with hostNetwork; the
+  # endpoints bind to the node loopback interface only — still change the
+  # ports when another hostNetwork CSI driver already uses them (9808 is
+  # the conventional CSI livenessprobe port).
+  healthPort: 9808          # CSI liveness-probe for the driver container
+  registrarHealthPort: 9809 # csi-node-driver-registrar http endpoint
+
+# -- Bundled snapshot-controller (Deployment, ServiceAccount, RBAC).
+snapshotController:
+  # -- Deploy the bundled snapshot-controller. Disable when the cluster
+  # already runs its own snapshot-controller. Note: the VolumeSnapshot
+  # CRDs in crds/ are installed by `helm install` but are NOT upgraded or
+  # removed by Helm afterwards (standard Helm crds/ semantics).
+  enabled: true
+
+# -- VolumeSnapshotClass configuration.
+volumeSnapshotClass:
+  # -- Create the VolumeSnapshotClass. Disable to manage it separately.
+  create: true
+  # -- Name of the VolumeSnapshotClass.
+  name: ncloud-block-storage
+  # -- Mark it as the cluster default snapshot class.
+  isDefault: true
+  # -- Deletion policy for snapshot contents: Delete or Retain.
+  deletionPolicy: Delete
+
+# -- StorageClass configuration.
+storageClass:
+  # -- Create the StorageClass. Disable to manage StorageClasses separately.
+  create: true
+  # -- Name of the default StorageClass.
+  name: ncloud-block-storage
+  # -- Set as the default StorageClass in the cluster.
+  isDefault: true
+  # -- Volume binding mode: WaitForFirstConsumer or Immediate.
+  volumeBindingMode: WaitForFirstConsumer
+  # -- Reclaim policy: Delete or Retain.
+  reclaimPolicy: Delete
+  # -- Allow volume expansion.
+  allowVolumeExpansion: true
+  # -- Block storage type: CB1 | CB2 (Common, SSD) or FB1 | FB2 (Fixed,
+  # HDD). The media follows the family, not the number: FB1 is not a
+  # faster CB1. The XEN-generation names "SSD"/"HDD" are rejected — see
+  # the volume type table in the README. StorageClass parameters
+  # are immutable: to change the type of an installed release, delete the
+  # StorageClass first (existing PVs are unaffected) and upgrade, or set
+  # create=false and manage the class yourself.
+  type: CB1
+  # -- Filesystem type recorded in the PV (ext4 | xfs). Kept explicit so
+  # kubelet applies fsGroup ownership (fsGroupPolicy
+  # ReadWriteOnceWithFSType skips chown when the PV fsType is empty).
+  # For xfs volumes, create an additional StorageClass with
+  # csi.storage.k8s.io/fstype: xfs instead of changing this default.
+  fsType: ext4

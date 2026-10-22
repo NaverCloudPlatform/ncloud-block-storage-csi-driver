@@ -1,0 +1,17 @@
+{{- if .Values.storageClass.create }}
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: {{ .Values.storageClass.name | quote }}
+  annotations:
+    storageclass.kubernetes.io/is-default-class: {{ .Values.storageClass.isDefault | quote }}
+provisioner: blk.csi.ncloud.com
+volumeBindingMode: {{ .Values.storageClass.volumeBindingMode }}
+reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
+allowVolumeExpansion: {{ .Values.storageClass.allowVolumeExpansion }}
+parameters:
+  type: {{ .Values.storageClass.type }}
+  # Explicit fstype so kubelet applies fsGroup ownership
+  # (ReadWriteOnceWithFSType requires a non-empty PV fsType).
+  csi.storage.k8s.io/fstype: {{ .Values.storageClass.fsType }}
+{{- end }}

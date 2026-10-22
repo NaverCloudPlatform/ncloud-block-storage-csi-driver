@@ -1,0 +1,17 @@
+# Restores a new volume from a VolumeSnapshot. The requested size must be
+# at least the size of the snapshot's source volume.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-pvc-restored
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: ncloud-block-storage
+  dataSource:
+    name: my-snapshot
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io

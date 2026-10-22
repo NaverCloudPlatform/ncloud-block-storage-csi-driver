@@ -1,0 +1,40 @@
+{{- if .Values.snapshotController.enabled }}
+# Modified from https://github.com/kubernetes-csi/external-snapshotter by NAVER Cloud Corp.
+# snapshot-controller: the upstream setup-snapshot-controller.yaml, with
+# the image, verbosity and retry interval set by this chart.
+
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: snapshot-controller
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: snapshot-controller
+  template:
+    metadata:
+      labels:
+        app: snapshot-controller
+    spec:
+      serviceAccountName: snapshot-controller
+      nodeSelector:
+        kubernetes.io/os: linux
+      containers:
+        - name: snapshot-controller
+          image: {{ .Values.image.snapshot_controller }}
+          args:
+            - "--v=2"
+            # Rolling updates briefly run two replicas; leader election
+            # (same as the upstream deployment) keeps one active.
+            - "--leader-election=true"
+            - "--retry-interval-start=15s"
+          imagePullPolicy: IfNotPresent
+          resources:
+            limits:
+              memory: 500Mi
+            requests:
+              cpu: 10m
+              memory: 20Mi
+{{- end }}

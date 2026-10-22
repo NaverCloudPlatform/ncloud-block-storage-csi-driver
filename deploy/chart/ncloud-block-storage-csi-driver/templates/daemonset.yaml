@@ -1,0 +1,221 @@
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: ncloud-block-storage-csi-node
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      app: ncloud-block-storage-csi-node
+  template:
+    metadata:
+      labels:
+        app: ncloud-block-storage-csi-node
+        role: ncloud-block-storage-csi
+    spec:
+      priorityClassName: system-node-critical
+      # The driver queries the Ncloud Instance Metadata Service
+      # (169.254.169.254) at startup, which requires the host network.
+      hostNetwork: true
+      # The node pod never talks to the Kubernetes API (see node-sa.yaml).
+      automountServiceAccountToken: false
+      # Names resolve through the node's resolver, as in the original
+      # driver: the pod reaches the API gateway (an external name) and
+      # the metadata service (an IP), and nothing in the cluster, so
+      # cluster DNS would only tie its startup to CoreDNS being reachable
+      # from this node.
+      dnsPolicy: Default
+      serviceAccountName: ncloud-block-storage-csi-node-sa
+      nodeSelector:
+        kubernetes.io/os: linux
+        {{- with .Values.node.nodeSelector }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.node.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: csi-node-driver-registrar
+          image: {{ .Values.image.csi_node_driver_registrar }}
+          args:
+            - "--v=2"
+            - "--csi-address=$(ADDRESS)"
+            - "--kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)"
+            # hostNetwork pod: bind to the node loopback interface only
+            # (see node.registrarHealthPort in values.yaml).
+            - "--http-endpoint=localhost:{{ .Values.node.registrarHealthPort }}"
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+            - name: DRIVER_REG_SOCK_PATH
+              value: /var/lib/kubelet/plugins/blk.csi.ncloud.com/csi.sock
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi/
+            - name: registration-dir
+              mountPath: /registration/
+          resources:
+            limits:
+              memory: 100Mi
+            requests:
+              cpu: 10m
+              memory: 20Mi
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              # the endpoint binds to loopback; hostNetwork makes the
+              # node's localhost reachable for the kubelet probe
+              host: localhost
+              path: /healthz
+              port: {{ .Values.node.registrarHealthPort }}
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 15
+          # The registrar opens its health endpoint only once the driver
+          # answers, and the driver answers only after its startup lookups
+          # (see the driver container's startupProbe below).
+          startupProbe:
+            httpGet:
+              host: localhost
+              path: /healthz
+              port: {{ .Values.node.registrarHealthPort }}
+              scheme: HTTP
+            timeoutSeconds: 15
+            periodSeconds: 10
+            failureThreshold: 36
+        - name: ncloud-block-storage-csi-driver
+          image: {{ required "image.csi_plugin is required (set it to your registry's ncloud-block-storage-csi-driver image)" .Values.image.csi_plugin }}
+          args:
+            - "--endpoint=$(CSI_ENDPOINT)"
+            - {{ printf "--regionCode=%s" .Values.regionCode | quote }}
+            - "--mode=node"
+            - "--logtostderr"
+            - "--v={{ .Values.node.logLevel }}"
+            {{- if .Values.apiUrl }}
+            - {{ printf "--apiUrl=%s" .Values.apiUrl | quote }}
+            {{- end }}
+            {{- if .Values.legacyRegionNo }}
+            - "--legacy-topology-region-no={{ .Values.legacyRegionNo }}"
+            {{- end }}
+            {{- /* The schema admits strings only, so "0" (--set-string on
+                   the command line) is the documented way to disable the
+                   wait. toString still guards the bare 0 that reaches
+                   here when schema validation is skipped: Go templates
+                   treat the integer 0 as false, and it must not vanish
+                   silently. */}}
+            {{- $deviceDiscoveryTimeout := .Values.node.deviceDiscoveryTimeout | toString }}
+            {{- if ne $deviceDiscoveryTimeout "" }}
+            - {{ printf "--device-discovery-timeout=%s" $deviceDiscoveryTimeout | quote }}
+            {{- end }}
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+            # The node plugin only reads the server instance/spec at
+            # startup, so it can run with a least-privilege key via
+            # credentials.node.secretName (falls back to the shared Secret).
+            - name: NCLOUD_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.credentials.node.secretName | default .Values.credentials.secretName | quote }}
+                  key: accessKey
+            - name: NCLOUD_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.credentials.node.secretName | default .Values.credentials.secretName | quote }}
+                  key: secretKey
+            {{- if .Values.maxVolumesPerNode }}
+            - name: MAX_VOLUMES_PER_NODE
+              value: {{ .Values.maxVolumesPerNode | quote }}
+            {{- end }}
+          imagePullPolicy: "IfNotPresent"
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN"]
+            allowPrivilegeEscalation: true
+          {{- with .Values.node.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: pods-mount-dir
+              mountPath: /var/lib/kubelet
+              mountPropagation: "Bidirectional"
+            - name: device-dir
+              mountPath: /dev
+            - name: host-os-release
+              mountPath: /host/etc/os-release
+              readOnly: true
+          ports:
+            - name: healthz
+              containerPort: {{ .Values.node.healthPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              host: localhost
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 5
+          # The node plugin resolves its instance, zone and attachment
+          # limit before it serves, and livenessprobe opens its endpoint
+          # only once the driver answers. With the Ncloud API slow those
+          # lookups take minutes: the server lookup is two API calls per
+          # attempt (instance detail, then spec detail) at 30 s each, three
+          # attempts with 6 s of backoff, so up to 186 s; the metadata
+          # lookup before it is up to about 70 s (3-second calls -- token,
+          # value, and a renewal after a 401 for each of the two values --
+          # three attempts, 6 s of backoff). Together about 255 s --
+          # longer than the liveness budget above, so without this the
+          # container was restarted before it could log what it was
+          # waiting for, and the startup never completed. 36 x 10 s leaves
+          # about 105 s of headroom over that worst case.
+          startupProbe:
+            httpGet:
+              host: localhost
+              path: /healthz
+              port: healthz
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 36
+        - name: liveness-probe
+          image: {{ .Values.image.liveness_probe }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --http-endpoint=localhost:{{ .Values.node.healthPort }}
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+          resources:
+            limits:
+              memory: 100Mi
+            requests:
+              cpu: 10m
+              memory: 20Mi
+      volumes:
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry/
+            type: DirectoryOrCreate
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/blk.csi.ncloud.com
+            type: DirectoryOrCreate
+        - name: pods-mount-dir
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: device-dir
+          hostPath:
+            path: /dev
+        - name: host-os-release
+          hostPath:
+            path: /etc/os-release
+            type: File

@@ -1,0 +1,141 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ncloud-block-storage-csi-driver Helm values",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "global": {
+      "description": "Values shared by Helm when this chart is used as a dependency.",
+      "type": "object"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "csi_provisioner": { "type": "string", "minLength": 1 },
+        "csi_attacher": { "type": "string", "minLength": 1 },
+        "csi_snapshotter": { "type": "string", "minLength": 1 },
+        "csi_resizer": { "type": "string", "minLength": 1 },
+        "csi_plugin": {
+          "description": "REQUIRED at install time (the template enforces it); empty only in the default values.",
+          "type": "string"
+        },
+        "liveness_probe": { "type": "string", "minLength": 1 },
+        "csi_node_driver_registrar": { "type": "string", "minLength": 1 },
+        "snapshot_controller": { "type": "string", "minLength": 1 }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "credentials": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "secretName": { "type": "string", "minLength": 1 },
+        "create": { "type": "boolean" },
+        "accessKey": { "type": "string" },
+        "secretKey": { "type": "string" },
+        "node": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "secretName": { "type": "string" },
+            "create": { "type": "boolean" },
+            "accessKey": { "type": "string" },
+            "secretKey": { "type": "string" }
+          },
+          "if": { "properties": { "create": { "const": true } } },
+          "then": { "required": ["secretName", "accessKey", "secretKey"] }
+        }
+      },
+      "if": { "properties": { "create": { "const": true } } },
+      "then": { "required": ["accessKey", "secretKey"] }
+    },
+    "regionCode": {
+      "description": "Ncloud API region: the prefix of the cluster's zone codes.",
+      "type": "string",
+      "enum": ["KR", "SGN", "JPN", "USWN", "DEN", "FKR", "KRS"]
+    },
+    "apiUrl": {
+      "description": "Ncloud API Gateway origin: scheme and host only, no path (the driver appends /vserver/v2). Empty uses the public gateway.",
+      "type": "string",
+      "pattern": "^(|https?://[^/\\s]+/?)$"
+    },
+    "legacyRegionNo": {
+      "description": "Empty, or the numeric regionNo found in the node labels of clusters whose PVs carry the legacy regionNo/zoneNo node affinity. An integer is accepted because --set parses bare digits as numbers.",
+      "oneOf": [
+        { "type": "string", "pattern": "^[0-9]*$" },
+        { "type": "integer", "minimum": 0 }
+      ]
+    },
+    "maxVolumesPerNode": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1 },
+        "logLevel": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "resources": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array", "items": { "type": "object" } },
+        "affinity": { "type": "object" }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "logLevel": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "deviceDiscoveryTimeout": { "type": "string", "pattern": "^$|^(0|([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+)$" },
+        "resources": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array", "items": { "type": "object" } },
+        "healthPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "registrarHealthPort": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "snapshotController": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "volumeSnapshotClass": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string", "minLength": 1 },
+        "isDefault": { "type": "boolean" },
+        "deletionPolicy": { "enum": ["Delete", "Retain"] }
+      }
+    },
+    "storageClass": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string", "minLength": 1 },
+        "isDefault": { "type": "boolean" },
+        "volumeBindingMode": { "enum": ["WaitForFirstConsumer", "Immediate"] },
+        "reclaimPolicy": { "enum": ["Delete", "Retain"] },
+        "allowVolumeExpansion": { "type": "boolean" },
+        "type": { "enum": ["CB1", "CB2", "FB1", "FB2"] },
+        "fsType": { "enum": ["ext4", "xfs"] }
+      }
+    }
+  }
+}

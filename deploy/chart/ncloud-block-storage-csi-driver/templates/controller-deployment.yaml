@@ -1,0 +1,194 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: ncloud-block-storage-csi-controller
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      app: ncloud-block-storage-csi-controller
+  template:
+    metadata:
+      labels:
+        app: ncloud-block-storage-csi-controller
+        role: ncloud-block-storage-csi
+    spec:
+      priorityClassName: system-cluster-critical
+      serviceAccountName: ncloud-block-storage-csi-controller-sa
+      nodeSelector:
+        kubernetes.io/os: linux
+        {{- with .Values.controller.nodeSelector }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 300
+        {{- with .Values.controller.tolerations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      containers:
+        - name: csi-provisioner
+          image: {{ .Values.image.csi_provisioner }}
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--volume-name-uuid-length=26"
+            # With WaitForFirstConsumer, pass only the selected node's
+            # topology to CreateVolume (same option the original nks-csi
+            # chart ships; lost during a sidecar upgrade and restored).
+            - "--strict-topology=true"
+            - "--extra-create-metadata"
+            - "--leader-election=true"
+            - "--timeout=60s"
+            - "--retry-interval-start=15s"
+            # Keep a provisioner-side default: with the common
+            # fsGroupPolicy ReadWriteOnceWithFSType, kubelet only applies
+            # fsGroup ownership when PV.spec.csi.fsType is set. An empty
+            # fsType would break volume writes for non-root pods. Use a
+            # StorageClass with csi.storage.k8s.io/fstype: xfs for xfs.
+            - "--default-fstype=ext4"
+            - "--v=2"
+          env:
+            - name: ADDRESS
+              value: /var/lib/csi/sockets/pluginproxy/csi.sock
+          imagePullPolicy: "IfNotPresent"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy/
+          resources:
+            limits:
+              memory: 500Mi
+            requests:
+              cpu: 10m
+              memory: 20Mi
+        - name: csi-attacher
+          image: {{ .Values.image.csi_attacher }}
+          args:
+            - "--v=2"
+            - "--csi-address=$(ADDRESS)"
+            - "--leader-election=true"
+            - "--timeout=60s"
+            - "--retry-interval-start=15s"
+          env:
+            - name: ADDRESS
+              value: /var/lib/csi/sockets/pluginproxy/csi.sock
+          imagePullPolicy: "IfNotPresent"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy/
+          resources:
+            limits:
+              memory: 500Mi
+            requests:
+              cpu: 10m
+              memory: 20Mi
+        - name: csi-resizer
+          image: {{ .Values.image.csi_resizer }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--leader-election=true"
+            - "--timeout=60s"
+            - "--retry-interval-start=15s"
+            - "--handle-volume-inuse-error=false"
+            - "--v=2"
+          env:
+            - name: ADDRESS
+              value: /var/lib/csi/sockets/pluginproxy/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy/
+          resources:
+            limits:
+              memory: 500Mi
+            requests:
+              cpu: 10m
+              memory: 20Mi
+        - name: csi-snapshotter
+          image: {{ .Values.image.csi_snapshotter }}
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--leader-election=true"
+            - "--snapshot-name-uuid-length=21"
+            - "--retry-interval-start=15s"
+            - "--v=2"
+          env:
+            - name: ADDRESS
+              value: /var/lib/csi/sockets/pluginproxy/csi.sock
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy/
+          resources:
+            limits:
+              memory: 400Mi
+            requests:
+              cpu: 10m
+              memory: 20Mi
+        - name: ncloud-block-storage-csi-driver
+          image: {{ required "image.csi_plugin is required (set it to your registry's ncloud-block-storage-csi-driver image)" .Values.image.csi_plugin }}
+          args:
+            - "--endpoint=$(CSI_ENDPOINT)"
+            - {{ printf "--regionCode=%s" .Values.regionCode | quote }}
+            - "--mode=controller"
+            - "--logtostderr"
+            - "--v={{ .Values.controller.logLevel }}"
+            {{- if .Values.apiUrl }}
+            - {{ printf "--apiUrl=%s" .Values.apiUrl | quote }}
+            {{- end }}
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///var/lib/csi/sockets/pluginproxy/csi.sock
+            - name: NCLOUD_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.credentials.secretName | quote }}
+                  key: accessKey
+            - name: NCLOUD_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.credentials.secretName | quote }}
+                  key: secretKey
+          imagePullPolicy: "IfNotPresent"
+          {{- with .Values.controller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy/
+          ports:
+            - name: healthz
+              containerPort: 9808
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 5
+        - name: liveness-probe
+          image: {{ .Values.image.liveness_probe }}
+          args:
+            - --csi-address=/csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+          resources:
+            limits:
+              memory: 100Mi
+            requests:
+              cpu: 10m
+              memory: 20Mi
+      volumes:
+        - name: socket-dir
+          emptyDir: {}

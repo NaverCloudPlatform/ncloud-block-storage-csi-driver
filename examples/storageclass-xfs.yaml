@@ -1,0 +1,14 @@
+# An additional StorageClass for XFS volumes. The chart's default
+# StorageClass provisions ext4; use a dedicated class for xfs instead of
+# changing the default (see README "StorageClass parameters").
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ncloud-block-storage-xfs
+provisioner: blk.csi.ncloud.com
+parameters:
+  type: CB1
+  csi.storage.k8s.io/fstype: xfs
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+allowVolumeExpansion: true

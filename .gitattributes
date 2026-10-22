@@ -1,0 +1,3 @@
+# Mark vendor directory as generated code so it's collapsed in PR diffs
+# -diff suppresses textual diff generation, reducing PR diff size on GitHub
+vendor/** linguist-generated=true -diff
